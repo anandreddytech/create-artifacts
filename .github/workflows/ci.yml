@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and test (multi-language safe)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+
+      - name: Run repository-wide checks and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Working dir: $(pwd)"
+          echo "=== Node.js section ==="
+          if [ -f package.json ]; then
+            echo "Found package.json — installing & testing"
+            npm ci || { echo "npm ci failed"; exit 1; }
+            if npm test --silent; then
+              echo "Node tests passed"
+            else
+              echo "Node tests failed (npm test exit != 0) — failing job"
+              exit 1
+            fi
+          else
+            echo "No package.json — skipping Node steps"
+          fi
+
+          echo "=== Python section ==="
+          if [ -f requirements.txt ] || [ -f pyproject.toml ] || ls *.py 1> /dev/null 2>&1; then
+            echo "Detected Python files or config — installing & running tests if available"
+            python -m pip install --upgrade pip setuptools wheel || true
+            if [ -f requirements.txt ]; then
+              pip install -r requirements.txt || true
+            elif [ -f pyproject.toml ]; then
+              pip install . || true
+            fi
+            if python -m pytest -q; then
+              echo "Python tests passed"
+            else
+              echo "Python tests failed or no tests found — continuing (set strict behaviour if desired)"
+              # If you want Python failures to fail the job, uncomment:
+              # exit 1
+            fi
+          else
+            echo "No Python config/files — skipping Python steps"
+          fi
+
+          echo "=== Go section ==="
+          if [ -f go.mod ]; then
+            echo "Found go.mod — running go test"
+            go test ./... || { echo "Go tests failed"; exit 1; }
+          else
+            echo "No go.mod — skipping Go steps"
+          fi
+
+          echo "=== Java/Maven section ==="
+          if [ -f pom.xml ]; then
+            echo "Found pom.xml — running mvn test"
+            mvn -B -DskipTests=false test || { echo "Maven tests failed"; exit 1; }
+          else
+            echo "No pom.xml — skipping Java/Maven steps"
+          fi
+
+          echo "All applicable language checks done."
+
+      - name: Collect CI artifacts (tests / manifests)
+        run: |
+          set -eu
+          ART_DIR=".ci-artifacts"
+          mkdir -p "${ART_DIR}"
+          # collect common manifests
+          for f in package.json package-lock.json yarn.lock pyproject.toml requirements.txt setup.py go.mod go.sum pom.xml; do
+            [ -f "$f" ] && cp --parents "$f" "${ART_DIR}" || true
+          done
+          # collect typical test reports (JUnit, coverage)
+          find . -type f \( -name "junit*.xml" -o -name "test-*.xml" -o -name "coverage*.xml" -o -name "coverage.xml" \) -maxdepth 6 -print0 \
+            | xargs -0 -I{} sh -c 'mkdir -p "${0%/*}" 2>/dev/null || true; cp --parents "{}" .ci-artifacts || true'
+          echo "Artifacts collected into ${ART_DIR}"
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-${{ github.sha }}
+          path: .ci-artifacts
